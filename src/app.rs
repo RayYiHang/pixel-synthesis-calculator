@@ -26,7 +26,7 @@ use gpui_kit::{
     FontWeight, Global, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     RenderOnce, SharedString, Styled as _, Subscription, Window,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// 结果列表每页显示条数。
@@ -141,6 +141,14 @@ pub struct App {
     results: Option<Arc<SearchOutcome>>,
     result_target: Option<u32>,
     page: usize,
+    /// 路线筛选：按英雄名搜索。
+    route_filter_text: Entity<InputState>,
+    filter_text: String,
+    /// 路线筛选：必须用到所选材料之一（多选，任一命中即保留）。
+    route_filter_mats: Entity<HeroComboState>,
+    filter_cids: Vec<u32>,
+    /// 筛选后保留的路线索引（None 表示未启用筛选）。
+    filtered: Option<Arc<Vec<usize>>>,
     status: SharedString,
     update_state: UpdateState,
     _subs: Vec<Subscription>,
@@ -171,6 +179,13 @@ impl App {
         });
         let account_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("游戏内账号角色名"));
+        let route_filter_text = cx
+            .new(|cx| InputState::new(window, cx).placeholder("按英雄名筛选路线（中文名 / 编号）"));
+        let route_filter_mats = cx.new(|cx| {
+            ComboboxState::new(mat_items(&data), vec![], window, cx)
+                .searchable(true)
+                .multiple(true)
+        });
 
         let mut _subs = Vec::new();
         _subs.push(Self::subscribe_target(&target_combo, window, cx));
@@ -195,6 +210,12 @@ impl App {
                 }
             }),
         );
+        _subs.extend(Self::subscribe_route_filters(
+            &route_filter_text,
+            &route_filter_mats,
+            window,
+            cx,
+        ));
 
         Self {
             status: "就绪 · 数据已加载".into(),
@@ -213,10 +234,82 @@ impl App {
             results: None,
             result_target: None,
             page: 1,
+            route_filter_text,
+            filter_text: String::new(),
+            route_filter_mats,
+            filter_cids: Vec::new(),
+            filtered: None,
             update_state: UpdateState::Idle,
             _subs,
         }
         .with_startup_update_check(cx)
+    }
+
+    /// 路线筛选控件的订阅：文本与材料任一变化即重新过滤。
+    fn subscribe_route_filters(
+        text_input: &Entity<InputState>,
+        mats_combo: &Entity<HeroComboState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        vec![
+            cx.subscribe_in(text_input, window, |this, _, event, _, cx| {
+                if let InputEvent::Change = event {
+                    this.filter_text = this.route_filter_text.read(cx).value().to_lowercase();
+                    this.rebuild_filter();
+                    cx.notify();
+                }
+            }),
+            cx.subscribe_in(mats_combo, window, |this, _, event, _, cx| {
+                let values = match event {
+                    ComboboxEvent::Change(values) => values,
+                    ComboboxEvent::Confirm(values) => values,
+                };
+                this.filter_cids = values.clone();
+                this.rebuild_filter();
+                cx.notify();
+            }),
+        ]
+    }
+
+    /// 路线筛选是否启用。
+    fn filter_active(&self) -> bool {
+        !self.filter_text.is_empty() || !self.filter_cids.is_empty()
+    }
+
+    /// 根据当前筛选条件重建保留的路线索引。
+    fn rebuild_filter(&mut self) {
+        if !self.filter_active() {
+            self.filtered = None;
+            return;
+        }
+        let Some(res) = &self.results else {
+            self.filtered = None;
+            return;
+        };
+        // 小写名称缓存（数量有限，全量构建）。
+        let zh: HashMap<u32, String> = self
+            .data
+            .cid_to_name
+            .iter()
+            .map(|(c, n)| (*c, n.to_lowercase()))
+            .collect();
+        let en: HashMap<u32, String> = self
+            .data
+            .cid_to_name_en
+            .iter()
+            .map(|(c, n)| (*c, n.to_lowercase()))
+            .collect();
+        let text = self.filter_text.clone();
+        let cids = &self.filter_cids;
+        let mut indices = Vec::new();
+        for (i, route) in res.routes.iter().enumerate() {
+            if route_hits(route, &text, cids, &zh, &en) {
+                indices.push(i);
+            }
+        }
+        self.filtered = Some(Arc::new(indices));
+        self.page = 1;
     }
 
     /// 启动时自动检测更新。
@@ -284,8 +377,10 @@ impl App {
         self.data = self.game.server(server);
         self.results = None;
         self.result_target = None;
+        self.filtered = None;
         self.page = 1;
         let target_cid = self.target_cid;
+        let filter_cids = self.filter_cids.clone();
         let data = self.data.clone();
         let target_items = target_items(&data);
         let mat_items = mat_items(&data);
@@ -297,20 +392,36 @@ impl App {
             state
         });
         self.mat_combo = cx.new(|cx| {
+            ComboboxState::new(mat_items.clone(), vec![], window, cx)
+                .searchable(true)
+                .multiple(true)
+        });
+        self.route_filter_mats = cx.new(|cx| {
             ComboboxState::new(mat_items, vec![], window, cx)
                 .searchable(true)
                 .multiple(true)
         });
         let target_combo = self.target_combo.clone();
         let mat_combo = self.mat_combo.clone();
+        let route_filter_mats = self.route_filter_mats.clone();
         self._subs
             .push(Self::subscribe_target(&target_combo, window, cx));
         self._subs
             .push(Self::subscribe_materials(&mat_combo, window, cx));
+        self._subs.extend(Self::subscribe_route_filters(
+            &self.route_filter_text.clone(),
+            &route_filter_mats,
+            window,
+            cx,
+        ));
         // 用已有库存恢复新 Combobox 的选择（不改变计数）。
         let cids: Vec<u32> = self.counts.keys().copied().collect();
         self.mat_combo.update(cx, |state, cx| {
             state.set_selected_values(&cids, window, cx);
+        });
+        // 恢复路线筛选的材料选择。
+        self.route_filter_mats.update(cx, |state, cx| {
+            state.set_selected_values(&filter_cids, window, cx);
         });
         self.status = format!("已切换到 {} 数据", server.label()).into();
         cx.notify();
@@ -521,6 +632,7 @@ impl App {
                 let (n, truncated, visits) =
                     (outcome.routes.len(), outcome.truncated, outcome.visits);
                 this.results = Some(Arc::new(outcome));
+                this.rebuild_filter();
                 this.status = format!(
                     "共 {} 条可合成路线{} · 耗时 {:.1} ms · 搜索 {} 节点{}",
                     fmt_num(n),
@@ -990,14 +1102,19 @@ impl App {
         let has_target = self.target_cid.is_some();
         let target_name = self.target_cid.map(|t| self.data.name(t).to_string());
         let header = self.render_results_header(cx).into_any_element();
+        let filter_bar = self.render_filter_bar(cx).into_any_element();
         let body = if computing {
             self.render_computing(cx).into_any_element()
         } else {
             let has_routes = self.results.as_ref().is_some_and(|r| !r.routes.is_empty());
             if has_routes {
-                let (routes, offset) = self.page_slice().unwrap_or_default();
-                self.render_route_list(&routes, offset, cx)
-                    .into_any_element()
+                if self.filter_active() && self.filtered.as_ref().is_none_or(|v| v.is_empty()) {
+                    self.render_filter_empty(cx).into_any_element()
+                } else {
+                    let (routes, offset) = self.page_slice().unwrap_or_default();
+                    self.render_route_list(&routes, offset, cx)
+                        .into_any_element()
+                }
             } else {
                 self.render_empty(target_name.as_deref(), star, has_target, cx)
                     .into_any_element()
@@ -1010,15 +1127,96 @@ impl App {
             .h_full()
             .bg(cx.theme().background)
             .child(header)
+            .child(filter_bar)
             .child(div().flex_1().min_h_0().child(body))
             .child(pagination)
     }
 
+    /// 无筛选命中时的占位视图。
+    fn render_filter_empty(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .child(
+                Icon::new(IconName::SearchX)
+                    .large()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(Label::new("没有符合筛选条件的路线").font_weight(FontWeight::MEDIUM))
+            .child(
+                Label::new("调整搜索关键词或材料筛选，或点击「清除筛选」查看全部路线。")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+    }
+
+    /// 结果区顶部的筛选工具栏。
+    fn render_filter_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_filter = self.filter_active();
+        h_flex()
+            .gap_2()
+            .items_center()
+            .px_4()
+            .py_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().sidebar)
+            .child(
+                Input::new(&self.route_filter_text)
+                    .small()
+                    .prefix(Icon::new(IconName::Search).small())
+                    .cleanable(true)
+                    .w(px(220.)),
+            )
+            .child(
+                Combobox::new(&self.route_filter_mats)
+                    .placeholder("只看用到某些材料的路线…")
+                    .search_placeholder("中文名、英文名或编号")
+                    .highlight_matches(true)
+                    .w(px(260.)),
+            )
+            .when(has_filter, |this| {
+                this.child(
+                    Label::new("筛选中")
+                        .text_xs()
+                        .text_color(cx.theme().primary),
+                )
+                .child(
+                    Button::new("clear-route-filter")
+                        .outline()
+                        .xsmall()
+                        .label("清除筛选")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.clear_route_filter(window, cx);
+                        })),
+                )
+            })
+            .child(
+                Label::new("材料筛选：路线需用到所选英雄之一")
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground),
+            )
+    }
+
+    /// 清除全部路线筛选。
+    fn clear_route_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_text.clear();
+        self.filter_cids.clear();
+        self.route_filter_text
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.route_filter_mats
+            .update(cx, |state, cx| state.clear_selection(cx));
+        self.filtered = None;
+        self.page = 1;
+        cx.notify();
+    }
+
     fn render_results_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (total, truncated) = self
-            .results
-            .as_ref()
-            .map_or((0usize, false), |r| (r.routes.len(), r.truncated));
+        let total = self.results.as_ref().map_or(0, |r| r.routes.len());
+        let truncated = self.results.as_ref().is_some_and(|r| r.truncated);
+        let visible = self.visible_route_count();
         let target = self
             .result_target
             .or(self.target_cid)
@@ -1042,11 +1240,15 @@ impl App {
                                 .text_color(cx.theme().muted_foreground),
                         )
                     })
-                    .when(total > 0, |this| {
+                    .when(visible > 0, |this| {
                         this.child(
-                            Label::new(SharedString::from(format!("共 {} 条", fmt_num(total))))
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground),
+                            Label::new(SharedString::from(if self.filter_active() {
+                                format!("筛选后 {} / {} 条", fmt_num(visible), fmt_num(total))
+                            } else {
+                                format!("共 {} 条", fmt_num(total))
+                            }))
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground),
                         )
                     }),
             )
@@ -1349,7 +1551,7 @@ impl App {
     }
 
     fn render_pagination(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let total_routes = self.results.as_ref().map_or(0, |r| r.routes.len());
+        let total_routes = self.visible_route_count();
         let total_pages = total_routes.div_ceil(PAGE_SIZE).max(1);
         let page = self.page.clamp(1, total_pages);
         h_flex()
@@ -1375,11 +1577,28 @@ impl App {
         if res.routes.is_empty() {
             return None;
         }
-        let total_pages = res.routes.len().div_ceil(PAGE_SIZE).max(1);
+        let total = self.visible_route_count();
+        let total_pages = total.div_ceil(PAGE_SIZE).max(1);
         let page = self.page.clamp(1, total_pages);
         let start = (page - 1) * PAGE_SIZE;
-        let end = (start + PAGE_SIZE).min(res.routes.len());
-        Some((res.routes[start..end].to_vec(), start))
+        let end = (start + PAGE_SIZE).min(total);
+        let routes = match &self.filtered {
+            Some(indices) => indices[start..end]
+                .iter()
+                .map(|&i| res.routes[i].clone())
+                .collect(),
+            None => res.routes[start..end].to_vec(),
+        };
+        Some((routes, start))
+    }
+
+    /// 当前可见路线数（筛选后）。
+    fn visible_route_count(&self) -> usize {
+        match (&self.filtered, &self.results) {
+            (Some(indices), Some(_)) => indices.len(),
+            (_, Some(res)) => res.routes.len(),
+            _ => 0,
+        }
     }
 
     // ---------- 导出 ----------
@@ -1401,7 +1620,13 @@ impl App {
             return;
         };
         let mut csv = String::from("\u{feff}序号,合成步骤,原始材料,材料份数\r\n");
-        for (i, route) in res.routes.iter().enumerate() {
+        // 导出遵循当前筛选结果。
+        let indices: Vec<usize> = match &self.filtered {
+            Some(f) => f.as_ref().clone(),
+            None => (0..res.routes.len()).collect(),
+        };
+        for (row, i) in indices.iter().enumerate() {
+            let route = &res.routes[*i];
             let steps: Vec<String> = route
                 .steps
                 .iter()
@@ -1418,7 +1643,7 @@ impl App {
             }
             csv.push_str(&format!(
                 "{},{},{},{}\r\n",
-                i + 1,
+                row + 1,
                 steps.join("；"),
                 mats.join("、"),
                 route.mats.len()
@@ -1513,6 +1738,36 @@ impl Render for App {
                     .child(update_control),
             )
     }
+}
+
+/// 单条路线是否命中筛选条件：材料多选（任一命中）与文本搜索同时生效。
+fn route_hits(
+    route: &Route,
+    text: &str,
+    cids: &[u32],
+    zh: &HashMap<u32, String>,
+    en: &HashMap<u32, String>,
+) -> bool {
+    // 路线中出现的全部英雄（步骤参与者 + 叶子材料）。
+    let mut used: Vec<u32> = route.mats.clone();
+    for step in &route.steps {
+        used.push(step.0);
+        used.push(step.1);
+        used.push(step.2);
+    }
+    if !cids.is_empty() && !cids.iter().any(|c| used.contains(c)) {
+        return false;
+    }
+    if !text.is_empty()
+        && !used.iter().any(|c| {
+            zh.get(c).is_some_and(|n| n.contains(text))
+                || en.get(c).is_some_and(|n| n.contains(text))
+                || c.to_string() == text
+        })
+    {
+        return false;
+    }
+    true
 }
 
 // ---------- 工具函数 ----------
@@ -1632,6 +1887,7 @@ fn fetch_account_crew(url: &str, data: &ServerData) -> Result<Vec<u32>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::Route;
 
     #[test]
     fn split_multiplier_cases() {
@@ -1646,5 +1902,28 @@ mod tests {
         assert_eq!(fmt_num(90612), "90,612");
         assert_eq!(fmt_num(1), "1");
         assert_eq!(fmt_num(1234), "1,234");
+    }
+
+    #[test]
+    fn route_hits_matching() {
+        let zh: HashMap<u32, String> = [(14, "美杜莎".to_string()), (11, "维纳斯".to_string())]
+            .into_iter()
+            .collect();
+        let en: HashMap<u32, String> = HashMap::new();
+        let route = Route {
+            steps: vec![(11, 16, 14)],
+            mats: vec![11, 16],
+        };
+        // 文本命中结果名。
+        assert!(route_hits(&route, "美杜莎", &[], &zh, &en));
+        assert!(!route_hits(&route, "不存在的名字", &[], &zh, &en));
+        // 材料筛选：任一命中即保留。
+        assert!(route_hits(&route, "", &[11], &zh, &en));
+        assert!(!route_hits(&route, "", &[99], &zh, &en));
+        // 组合条件需同时满足。
+        assert!(route_hits(&route, "美杜莎", &[11], &zh, &en));
+        assert!(!route_hits(&route, "维纳斯", &[99], &zh, &en));
+        // 按编号搜索。
+        assert!(route_hits(&route, "14", &[], &zh, &en));
     }
 }
