@@ -8,8 +8,12 @@ VERSION="${1:-${GITHUB_REF_NAME#v}}"
 VERSION="${VERSION:-1.0.0}"
 PKG_NAME="pixel-synthesis-calculator"
 
-if [[ ! -f "$PKG_NAME" ]]; then
-    echo "缺少二进制 $PKG_NAME，请先 cargo build --release" >&2
+if [[ -f "target/release/$PKG_NAME" ]]; then
+    BIN="target/release/$PKG_NAME"
+elif [[ -f "$PKG_NAME" ]]; then
+    BIN="$PKG_NAME"
+else
+    echo "缺少二进制 $PKG_NAME（target/release/ 或当前目录），请先 cargo build --release" >&2
     exit 1
 fi
 
@@ -21,7 +25,7 @@ mkdir -p "$STAGE/DEBIAN" \
     "$STAGE/usr/share/applications" \
     "$STAGE/usr/share/pixmaps"
 
-install -m 755 "$PKG_NAME" "$STAGE/usr/bin/$PKG_NAME"
+install -m 755 "$BIN" "$STAGE/usr/bin/$PKG_NAME"
 
 cat > "$STAGE/DEBIAN/control" <<EOF
 Package: $PKG_NAME
