@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// 一条完整合成路线。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Route {
     /// 合成步骤，`(材料a, 材料b, 结果)`；首项为最终合成，其余为中间合成。
     pub steps: Vec<(u32, u32, u32)>,

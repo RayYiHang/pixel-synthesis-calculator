@@ -122,6 +122,12 @@ enum UpdateState {
     Finished { ok: bool, message: String },
 }
 
+/// 收藏文件结构（持久化到用户主目录）。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FavoritesFile {
+    routes: Vec<Route>,
+}
+
 /// 主窗口视图。
 pub struct App {
     game: Arc<GameData>,
@@ -149,6 +155,10 @@ pub struct App {
     filter_cids: Vec<u32>,
     /// 筛选后保留的路线索引（None 表示未启用筛选）。
     filtered: Option<Arc<Vec<usize>>>,
+    /// 收藏的路线（持久化到用户目录）。
+    favorites: Vec<Route>,
+    /// 是否正在浏览收藏夹。
+    show_favorites: bool,
     status: SharedString,
     update_state: UpdateState,
     _subs: Vec<Subscription>,
@@ -239,6 +249,8 @@ impl App {
             route_filter_mats,
             filter_cids: Vec::new(),
             filtered: None,
+            favorites: Self::load_favorites(),
+            show_favorites: false,
             update_state: UpdateState::Idle,
             _subs,
         }
@@ -813,6 +825,96 @@ impl App {
             .child(version_label)
     }
 
+    // ---------- 收藏夹 ----------
+
+    /// 收藏文件位置：用户主目录下。
+    fn favorites_path() -> Option<std::path::PathBuf> {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()?;
+        Some(
+            std::path::PathBuf::from(home)
+                .join(".pixel-synthesis-calculator")
+                .join("favorites.json"),
+        )
+    }
+
+    fn load_favorites() -> Vec<Route> {
+        Self::favorites_path()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|bytes| serde_json::from_slice::<FavoritesFile>(&bytes).ok())
+            .map(|file| file.routes)
+            .unwrap_or_default()
+    }
+
+    fn save_favorites(&self) {
+        let Some(path) = Self::favorites_path() else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&FavoritesFile {
+            routes: self.favorites.clone(),
+        }) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    fn is_favorite(&self, route: &Route) -> bool {
+        self.favorites.contains(route)
+    }
+
+    fn toggle_favorite(&mut self, route: &Route, cx: &mut Context<Self>) {
+        if let Some(pos) = self.favorites.iter().position(|r| r == route) {
+            self.favorites.remove(pos);
+        } else {
+            self.favorites.insert(0, route.clone());
+        }
+        self.save_favorites();
+        cx.notify();
+    }
+
+    /// 收藏夹视图。
+    fn render_favorites(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.favorites.is_empty() {
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    Icon::new(IconName::Star)
+                        .large()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(Label::new("还没有收藏的路线").font_weight(FontWeight::MEDIUM))
+                .child(
+                    Label::new("在计算结果中点击路线右侧的星标即可收藏，收藏会跨会话保留。")
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .into_any_element();
+        }
+        let total = self.favorites.len();
+        let total_pages = total.div_ceil(PAGE_SIZE).max(1);
+        let page = self.page.clamp(1, total_pages);
+        let start = (page - 1) * PAGE_SIZE;
+        let end = (start + PAGE_SIZE).min(total);
+        let slice: Vec<Route> = self.favorites[start..end].to_vec();
+        let items = slice
+            .iter()
+            .enumerate()
+            .map(|(i, route)| self.render_route(start + i + 1, route, cx))
+            .collect::<Vec<_>>();
+        div()
+            .id("favorites-list")
+            .size_full()
+            .overflow_y_scrollbar()
+            .child(v_flex().px_4().py_2().children(items))
+            .into_any_element()
+    }
+
     // ---------- 渲染 ----------
 
     fn render_title_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1103,7 +1205,9 @@ impl App {
         let target_name = self.target_cid.map(|t| self.data.name(t).to_string());
         let header = self.render_results_header(cx).into_any_element();
         let filter_bar = self.render_filter_bar(cx).into_any_element();
-        let body = if computing {
+        let body = if self.show_favorites {
+            self.render_favorites(cx).into_any_element()
+        } else if computing {
             self.render_computing(cx).into_any_element()
         } else {
             let has_routes = self.results.as_ref().is_some_and(|r| !r.routes.is_empty());
@@ -1127,7 +1231,7 @@ impl App {
             .h_full()
             .bg(cx.theme().background)
             .child(header)
-            .child(filter_bar)
+            .when(!self.show_favorites, |this| this.child(filter_bar))
             .child(div().flex_1().min_h_0().child(body))
             .child(pagination)
     }
@@ -1214,9 +1318,24 @@ impl App {
     }
 
     fn render_results_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let total = self.results.as_ref().map_or(0, |r| r.routes.len());
+        let total = if self.show_favorites {
+            self.favorites.len()
+        } else {
+            self.results.as_ref().map_or(0, |r| r.routes.len())
+        };
         let truncated = self.results.as_ref().is_some_and(|r| r.truncated);
-        let visible = self.visible_route_count();
+        let visible = if self.show_favorites {
+            self.favorites.len()
+        } else {
+            self.visible_route_count()
+        };
+        let title = if self.show_favorites {
+            "收藏夹"
+        } else {
+            "可合成路线"
+        };
+        let fav_count = self.favorites.len();
+        let show_favorites = self.show_favorites;
         let target = self
             .result_target
             .or(self.target_cid)
@@ -1232,33 +1351,59 @@ impl App {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(Label::new("可合成路线").font_weight(FontWeight::MEDIUM))
-                    .when_some(target, |this, (name, star)| {
-                        this.child(StarBadge { star }).child(
-                            Label::new(SharedString::from(name))
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                    })
+                    .child(Label::new(title).font_weight(FontWeight::MEDIUM))
+                    .when_some(
+                        if show_favorites { None } else { target },
+                        |this, (name, star)| {
+                            this.child(StarBadge { star }).child(
+                                Label::new(SharedString::from(name))
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                        },
+                    )
                     .when(visible > 0, |this| {
                         this.child(
-                            Label::new(SharedString::from(if self.filter_active() {
-                                format!("筛选后 {} / {} 条", fmt_num(visible), fmt_num(total))
-                            } else {
-                                format!("共 {} 条", fmt_num(total))
-                            }))
+                            Label::new(SharedString::from(
+                                if !show_favorites && self.filter_active() {
+                                    format!("筛选后 {} / {} 条", fmt_num(visible), fmt_num(total))
+                                } else {
+                                    format!("共 {} 条", fmt_num(total))
+                                },
+                            ))
                             .text_sm()
                             .text_color(cx.theme().muted_foreground),
                         )
                     }),
             )
-            .when(truncated, |this| {
-                this.child(
-                    Label::new("结果数量已达上限，仅显示部分结果")
-                        .text_sm()
-                        .text_color(cx.theme().warning),
-                )
-            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .when(truncated && !show_favorites, |this| {
+                        this.child(
+                            Label::new("结果数量已达上限，仅显示部分结果")
+                                .text_sm()
+                                .text_color(cx.theme().warning),
+                        )
+                    })
+                    .child(
+                        Button::new("toggle-favorites")
+                            .small()
+                            .icon(if show_favorites {
+                                IconName::StarFill
+                            } else {
+                                IconName::Star
+                            })
+                            .label(SharedString::from(fmt_num(fav_count)))
+                            .tooltip("收藏夹：查看已收藏的合成路线")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_favorites = !this.show_favorites;
+                                this.page = 1;
+                                cx.notify();
+                            })),
+                    ),
+            )
     }
 
     fn render_computing(&mut self, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -1445,16 +1590,15 @@ impl App {
     }
 
     fn render_route_list(
-        &self,
+        &mut self,
         routes: &[Route],
         offset: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let target = self.result_target.unwrap_or(0);
         let items = routes
             .iter()
             .enumerate()
-            .map(|(i, route)| self.render_route(offset + i + 1, route, target, cx))
+            .map(|(i, route)| self.render_route(offset + i + 1, route, cx))
             .collect::<Vec<_>>();
         div()
             .id("route-list")
@@ -1463,95 +1607,163 @@ impl App {
             .child(v_flex().px_4().py_2().children(items))
     }
 
+    /// 英雄名 + 星级徽标（用于路线文本行内）。
+    fn hero_chip(&self, cid: u32) -> impl IntoElement {
+        h_flex()
+            .gap_1()
+            .items_center()
+            .child(StarBadge {
+                star: self.data.star(cid),
+            })
+            .child(
+                div()
+                    .text_sm()
+                    .child(SharedString::from(self.data.name(cid).to_owned())),
+            )
+    }
+
+    /// 单条路线行（含星级标注与收藏按钮）。
     fn render_route(
-        &self,
+        &mut self,
         seq: usize,
         route: &Route,
-        target: u32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let step_text = |step: &(u32, u32, u32)| -> String {
-            format!(
-                "{} + {} = {}",
-                self.data.name(step.0),
-                self.data.name(step.1),
-                self.data.name(step.2)
-            )
+        let step_line = |step: &(u32, u32, u32), muted: bool| {
+            let (a, b, result) = (step.0, step.1, step.2);
+            let text_color = if muted {
+                cx.theme().muted_foreground
+            } else {
+                cx.theme().foreground
+            };
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .child(self.hero_chip(a))
+                .child(
+                    Label::new("+")
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(self.hero_chip(b))
+                .child(
+                    Label::new("=")
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(self.hero_chip(result))
+                .text_color(text_color)
         };
-        let final_line = step_text(&route.steps[0]);
-        let intermediates: Vec<String> = route.steps[1..].iter().map(step_text).collect();
-        let mut mats_unique: Vec<String> = Vec::new();
+
+        // 材料去重（保留首次出现顺序），标注份数。
+        let mut mats_unique: Vec<(u32, usize)> = Vec::new(); // (cid, count)
         for m in &route.mats {
-            let name = self.data.name(*m).to_string();
             let n = route.mats.iter().filter(|x| **x == *m).count();
-            let label = if n > 1 { format!("{name}×{n}") } else { name };
-            if !mats_unique.contains(&label) {
-                mats_unique.push(label);
+            if let Some(existing) = mats_unique.iter_mut().find(|(c, _)| c == m) {
+                existing.1 = n;
+            } else {
+                mats_unique.push((*m, n));
             }
         }
-        let target_star = self.data.star(target);
+        let is_fav = self.is_favorite(route);
+        let route_for_toggle = route.clone();
+        let fav_button = Button::new(("route-fav", seq))
+            .ghost()
+            .xsmall()
+            .icon(if is_fav {
+                IconName::StarFill
+            } else {
+                IconName::Star
+            })
+            .tooltip(if is_fav {
+                "取消收藏"
+            } else {
+                "收藏该路线"
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_favorite(&route_for_toggle, cx);
+            }));
 
-        v_flex()
-            .id(("route", seq))
-            .py_2()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .gap_1()
-            .child(
+        let content = v_flex().flex_1().min_w_0().gap_1().child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .text_xs()
+                        .min_w_8()
+                        .text_right()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from(fmt_num(seq))),
+                )
+                .child(step_line(&route.steps[0], false)),
+        );
+        let content = content
+            .children(route.steps[1..].iter().map(|step| {
                 h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_xs()
-                            .min_w_8()
-                            .text_right()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(fmt_num(seq))),
-                    )
-                    .child(StarBadge { star: target_star })
-                    .child(
-                        Label::new(SharedString::from(final_line))
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM),
-                    ),
-            )
-            .children(intermediates.into_iter().map(|line| {
-                h_flex()
-                    .gap_2()
+                    .gap_1p5()
                     .pl_16()
                     .child(
                         Icon::new(IconName::CornerDownRight)
                             .xsmall()
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(line),
-                    )
+                    .child(step_line(step, true))
             }))
             .child(
                 h_flex()
                     .gap_2()
                     .pl_16()
+                    .items_start()
                     .child(
                         Label::new("材料")
                             .text_xs()
+                            .pt_0p5()
                             .text_color(cx.theme().muted_foreground),
                     )
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(mats_unique.join("、"))),
+                        h_flex()
+                            .flex_wrap()
+                            .gap_x_2()
+                            .gap_y_1()
+                            .items_center()
+                            .children(mats_unique.iter().map(|(cid, count)| {
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(StarBadge {
+                                        star: self.data.star(*cid),
+                                    })
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(SharedString::from(if *count > 1 {
+                                                format!("{}×{}", self.data.name(*cid), count)
+                                            } else {
+                                                self.data.name(*cid).to_owned()
+                                            })),
+                                    )
+                            })),
                     ),
-            )
+            );
+
+        h_flex()
+            .id(("route", seq))
+            .py_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .items_start()
+            .child(content)
+            .child(fav_button)
     }
 
     fn render_pagination(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let total_routes = self.visible_route_count();
+        let total_routes = if self.show_favorites {
+            self.favorites.len()
+        } else {
+            self.visible_route_count()
+        };
         let total_pages = total_routes.div_ceil(PAGE_SIZE).max(1);
         let page = self.page.clamp(1, total_pages);
         h_flex()
