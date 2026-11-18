@@ -2,6 +2,7 @@
 
 use crate::model::{GameData, Server, ServerData};
 use crate::search::{search_routes, Inventory, Route, SearchLimits, SearchOutcome};
+use crate::update;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::{
@@ -21,9 +22,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, AnyWindowHandle, AppContext as _, Context, Entity, Focusable as _, FontWeight, Global,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderOnce, SharedString,
-    Styled as _, Subscription, Window,
+    div, px, AnyElement, AnyWindowHandle, AppContext as _, Context, Entity, Focusable as _,
+    FontWeight, Global, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    RenderOnce, SharedString, Styled as _, Subscription, Window,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -104,6 +105,23 @@ impl RenderOnce for StarBadge {
     }
 }
 
+/// 更新检测 / 安装状态。
+#[derive(Clone)]
+enum UpdateState {
+    /// 尚未检测。
+    Idle,
+    /// 检测中。
+    Checking,
+    /// 已是最新。
+    UpToDate,
+    /// 发现新版本。
+    Available { tag: String, url: String },
+    /// 正在下载。
+    Downloading,
+    /// 安装结果提示（成功 / 失败原因）。
+    Finished { ok: bool, message: String },
+}
+
 /// 主窗口视图。
 pub struct App {
     game: Arc<GameData>,
@@ -124,6 +142,7 @@ pub struct App {
     result_target: Option<u32>,
     page: usize,
     status: SharedString,
+    update_state: UpdateState,
     _subs: Vec<Subscription>,
 }
 
@@ -194,8 +213,21 @@ impl App {
             results: None,
             result_target: None,
             page: 1,
+            update_state: UpdateState::Idle,
             _subs,
         }
+        .with_startup_update_check(cx)
+    }
+
+    /// 启动时自动检测更新。
+    fn with_startup_update_check(self, cx: &mut Context<Self>) -> Self {
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |this, cx| {
+                this.check_for_updates(cx);
+            });
+        })
+        .detach();
+        self
     }
 
     fn subscribe_target(
@@ -506,6 +538,167 @@ impl App {
             });
         })
         .detach();
+    }
+
+    // ---------- 更新 ----------
+
+    /// 检测 GitHub 最新 Release。
+    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        self.update_state = UpdateState::Checking;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let latest = cx
+                .background_executor()
+                .spawn(async move { update::fetch_latest() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.update_state = match latest {
+                    Ok(rel) if update::is_newer(&rel.tag, update::CURRENT_VERSION) => {
+                        UpdateState::Available {
+                            tag: rel.tag,
+                            url: rel.asset_url,
+                        }
+                    }
+                    Ok(_) => UpdateState::UpToDate,
+                    Err(msg) => UpdateState::Finished {
+                        ok: false,
+                        message: msg,
+                    },
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 一键更新：下载当前平台资产并安装。
+    fn perform_update(&mut self, cx: &mut Context<Self>) {
+        let UpdateState::Available { url, .. } = &self.update_state else {
+            return;
+        };
+        let url = url.clone();
+        self.update_state = UpdateState::Downloading;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let work = cx.background_executor().spawn(async move {
+                let ext = match std::env::consts::OS {
+                    "windows" => "zip",
+                    "macos" => "dmg",
+                    _ => "deb",
+                };
+                let dest =
+                    std::env::temp_dir().join(format!("{}-update.{ext}", env!("CARGO_PKG_NAME")));
+                let _ = std::fs::remove_file(&dest);
+                let _ = update::download_to(&url, &dest)?;
+                let message = match update::install_auto(&dest)? {
+                    update::InstallOutcome::Restart(new_exe) => {
+                        // 启动新版本并退出当前实例。
+                        std::process::Command::new(new_exe).spawn().ok();
+                        std::process::exit(0);
+                    }
+                    update::InstallOutcome::Message(message) => message,
+                };
+                Ok::<String, String>(message)
+            });
+            let result = work.await;
+            let _ = this.update(cx, |this, cx| {
+                this.update_state = match result {
+                    Ok(message) => UpdateState::Finished { ok: true, message },
+                    Err(message) => UpdateState::Finished { ok: false, message },
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 状态栏右下角的更新控件。
+    fn render_update_control(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let version_label = Label::new(SharedString::from(format!("v{}", update::CURRENT_VERSION)))
+            .text_xs()
+            .text_color(cx.theme().muted_foreground);
+        let control: AnyElement = match &self.update_state {
+            UpdateState::Idle => Button::new("check-update")
+                .ghost()
+                .xsmall()
+                .label("检查更新")
+                .icon(IconName::RefreshCw)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.check_for_updates(cx);
+                }))
+                .into_any_element(),
+            UpdateState::Checking => h_flex()
+                .gap_1()
+                .items_center()
+                .child(Spinner::new().xsmall())
+                .child(
+                    Label::new("检查更新中…")
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .into_any_element(),
+            UpdateState::UpToDate => Label::new("已是最新版本")
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element(),
+            UpdateState::Available { tag, .. } => Button::new("do-update")
+                .primary()
+                .xsmall()
+                .label(SharedString::from(format!("一键更新到 {tag}")))
+                .icon(IconName::Download)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.perform_update(cx);
+                }))
+                .into_any_element(),
+            UpdateState::Downloading => h_flex()
+                .gap_1()
+                .items_center()
+                .child(Spinner::new().xsmall())
+                .child(
+                    Label::new("正在下载更新…")
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .into_any_element(),
+            UpdateState::Finished { ok, message } => h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    Icon::new(if *ok {
+                        IconName::CircleCheck
+                    } else {
+                        IconName::CircleAlert
+                    })
+                    .xsmall()
+                    .text_color(if *ok {
+                        cx.theme().success
+                    } else {
+                        cx.theme().danger
+                    }),
+                )
+                .child(
+                    Label::new(SharedString::from(message.clone()))
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .max_w(px(280.))
+                        .truncate(),
+                )
+                .child(
+                    Button::new("recheck-update")
+                        .ghost()
+                        .xsmall()
+                        .label(if *ok { "检查更新" } else { "重试" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.check_for_updates(cx);
+                        })),
+                )
+                .into_any_element(),
+        };
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(control)
+            .child(version_label)
     }
 
     // ---------- 渲染 ----------
@@ -1286,7 +1479,7 @@ impl App {
 impl Render for App {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status = self.status.clone();
-        let server_label = self.server.label();
+        let update_control = self.render_update_control(cx).into_any_element();
         let title_bar = self.render_title_bar(cx).into_any_element();
         let sidebar = self.render_sidebar(cx).into_any_element();
         let results = self.render_results(cx).into_any_element();
@@ -1317,13 +1510,7 @@ impl Render for App {
                             .text_xs()
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .child(
-                        Label::new(SharedString::from(format!(
-                            "{server_label} 数据 · 像素星舰合成计算器 v1.1"
-                        )))
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground),
-                    ),
+                    .child(update_control),
             )
     }
 }

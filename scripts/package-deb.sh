@@ -27,6 +27,12 @@ mkdir -p "$STAGE/DEBIAN" \
 
 install -m 755 "$BIN" "$STAGE/usr/bin/$PKG_NAME"
 
+# 应用图标（来自 pixelstarships.com 标签页图标）
+ICON_SRC="$(dirname "$0")/../assets/icon/icon_256.png"
+if [[ -f "$ICON_SRC" ]]; then
+    install -m 644 "$ICON_SRC" "$STAGE/usr/share/pixmaps/$PKG_NAME.png"
+fi
+
 cat > "$STAGE/DEBIAN/control" <<EOF
 Package: $PKG_NAME
 Version: $VERSION
@@ -46,6 +52,7 @@ Name=像素星舰合成计算器
 Comment=Pixel Starships 英雄合成路线计算
 Exec=$PKG_NAME
 Terminal=false
+Icon=$PKG_NAME
 Categories=Game;Utility;
 EOF
 

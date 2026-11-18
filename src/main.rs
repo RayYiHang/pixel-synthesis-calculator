@@ -3,6 +3,7 @@
 mod app;
 mod model;
 mod search;
+mod update;
 
 use app::{App, MainWindowHandle};
 use gpui_kit::component::TitleBar;
@@ -11,6 +12,8 @@ use gpui_kit::{
 };
 
 fn main() {
+    // Windows：清理上次一键更新遗留的旧版本备份。
+    update::cleanup_old_backup();
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
         // 默认日间模式。

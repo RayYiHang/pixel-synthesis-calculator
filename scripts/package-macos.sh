@@ -24,6 +24,12 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$APP_NAME" "$APP_DIR/Contents/MacOS/"
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 
+# 应用图标（来自 pixelstarships.com 标签页图标）
+ICON_SRC="$(dirname "$0")/../assets/icon/icon.icns"
+if [[ -f "$ICON_SRC" ]]; then
+    cp "$ICON_SRC" "$APP_DIR/Contents/Resources/$APP_NAME.icns"
+fi
+
 cat > "$APP_DIR/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -35,6 +41,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleExecutable</key><string>$APP_NAME</string>
+    <key>CFBundleIconFile</key><string>$APP_NAME</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>LSMinimumSystemVersion</key><string>10.15</string>
