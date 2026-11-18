@@ -13,7 +13,8 @@ use gpui_kit::{
 fn main() {
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+        // 默认日间模式。
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Light, None, cx);
 
         let bounds = gpui_kit::Bounds::centered(None, size(px(1200.), px(800.)), cx);
         let options = WindowOptions {

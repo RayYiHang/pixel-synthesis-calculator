@@ -25,6 +25,7 @@ use gpui_kit::{
     InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderOnce, SharedString,
     Styled as _, Subscription, Window,
 };
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// 结果列表每页显示条数。
@@ -283,6 +284,15 @@ impl App {
         cx.notify();
     }
 
+    fn clear_materials(&mut self, cx: &mut Context<Self>) {
+        self.counts.clear();
+        self.mat_order.clear();
+        self.mat_combo
+            .update(cx, |state, cx| state.clear_selection(cx));
+        self.status = "已清空材料".into();
+        cx.notify();
+    }
+
     fn remove_material(&mut self, cid: u32, window: &mut Window, cx: &mut Context<Self>) {
         self.counts.remove(&cid);
         self.mat_order.retain(|&c| c != cid);
@@ -454,15 +464,22 @@ impl App {
             return;
         }
         let inv = self.counts.clone();
+        let all_recipes = self.counts.is_empty();
         let data = self.data.clone();
         self.computing = true;
-        self.status = "正在计算合成路线…".into();
+        self.status = if all_recipes {
+            "未录入材料，正在枚举全部理论配方…".into()
+        } else {
+            "正在计算合成路线…".into()
+        };
         cx.notify();
         let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
-                .spawn(async move { search_routes(&data, target, &inv, SearchLimits::default()) })
+                .spawn(async move {
+                    search_routes(&data, target, &inv, SearchLimits::default(), all_recipes)
+                })
                 .await;
             let elapsed = started.elapsed();
             let _ = this.update(cx, |this, cx| {
@@ -473,8 +490,13 @@ impl App {
                     (outcome.routes.len(), outcome.truncated, outcome.visits);
                 this.results = Some(Arc::new(outcome));
                 this.status = format!(
-                    "共 {} 条可合成路线 · 耗时 {:.1} ms · 搜索 {} 节点{}",
+                    "共 {} 条可合成路线{} · 耗时 {:.1} ms · 搜索 {} 节点{}",
                     fmt_num(n),
+                    if all_recipes {
+                        "（全部理论配方）"
+                    } else {
+                        ""
+                    },
                     elapsed.as_secs_f64() * 1000.0,
                     fmt_num(visits as usize),
                     if truncated { " · 结果已截断" } else { "" }
@@ -572,6 +594,7 @@ impl App {
                                     .placeholder("搜索 4★ / 5★ / 7★ 英雄…")
                                     .search_placeholder("中文名、英文名或编号")
                                     .highlight_matches(true)
+                                    .cleanable(true)
                                     .w_full(),
                             )
                             .when(star > 0, |this| this.child(StarBadge { star })),
@@ -581,15 +604,32 @@ impl App {
                 v_flex()
                     .gap_2()
                     .child(
-                        Label::new("已有材料")
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground),
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                Label::new("已有材料")
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                Button::new("clear-materials")
+                                    .ghost()
+                                    .xsmall()
+                                    .label("清空")
+                                    .icon(IconName::X)
+                                    .disabled(self.counts.is_empty())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.clear_materials(cx);
+                                    })),
+                            ),
                     )
                     .child(
                         Combobox::new(&self.mat_combo)
                             .placeholder("添加材料英雄（可多选、搜索）…")
                             .search_placeholder("中文名、英文名或编号")
                             .highlight_matches(true)
+                            .cleanable(true)
                             .w_full(),
                     )
                     .child(
@@ -851,7 +891,7 @@ impl App {
         } else if self.results.is_some() {
             (
                 "没有找到可行的合成路线",
-                "当前材料不足以合成该目标，请补充材料后再试。".to_string(),
+                "当前材料不足以合成该目标，下方列出这些材料可以直接合成的内容。".to_string(),
             )
         } else if star == 6 {
             (
@@ -866,23 +906,147 @@ impl App {
                     .unwrap_or_default(),
             )
         };
+        // 失败时展示「当前材料可以直接合成」的预览。
+        let hints = if self.results.is_some() && !self.counts.is_empty() {
+            self.craftable_previews()
+        } else {
+            Vec::new()
+        };
         v_flex()
             .size_full()
-            .items_center()
+            .overflow_y_scrollbar()
+            .items_start()
             .justify_center()
             .gap_2()
             .px_8()
+            .py_6()
             .child(
-                Icon::new(IconName::PackageSearch)
-                    .large()
-                    .text_color(cx.theme().muted_foreground),
+                v_flex()
+                    .items_center()
+                    .gap_2()
+                    .mt_4()
+                    .child(
+                        Icon::new(IconName::PackageSearch)
+                            .large()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(Label::new(title).text_lg().font_weight(FontWeight::MEDIUM))
+                    .child(
+                        Label::new(detail)
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
             )
-            .child(Label::new(title).text_lg().font_weight(FontWeight::MEDIUM))
-            .child(
-                Label::new(detail)
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground),
-            )
+            .when(!hints.is_empty(), |this| {
+                this.child(
+                    v_flex()
+                        .mt_4()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    Label::new("你的材料可以直接合成")
+                                        .font_weight(FontWeight::MEDIUM),
+                                )
+                                .child(
+                                    Label::new(SharedString::from(format!(
+                                        "{} 项",
+                                        fmt_num(hints.len())
+                                    )))
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        .children(hints.iter().take(12).map(|(star, a, b, result)| {
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(StarBadge { star: *star })
+                                .child(
+                                    Label::new(SharedString::from(format!(
+                                        "{} + {} = {}",
+                                        self.data.name(*a),
+                                        self.data.name(*b),
+                                        self.data.name(*result),
+                                    )))
+                                    .text_sm(),
+                                )
+                        }))
+                        .when(hints.len() > 12, |this| {
+                            this.child(
+                                Label::new(SharedString::from(format!(
+                                    "… 其余 {} 项从略",
+                                    hints.len() - 12
+                                )))
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground),
+                            )
+                        })
+                        .child(
+                            Label::new("预览仅统计一步可合成的结果，未考虑材料重复占用；补充材料后点击「计算合成路线」可查看完整路线。")
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground),
+                        ),
+                )
+            })
+    }
+
+    /// 用当前库存一步可合成的内容预览：`(结果星级, a, b, 结果)`。
+    ///
+    /// 中间体可由库存直接提供，或由更低星级材料现场合成；仅做提示用途，
+    /// 不精确扣减跨步骤的材料占用。
+    fn craftable_previews(&self) -> Vec<(u8, u32, u32, u32)> {
+        let d = &self.data;
+        let inv = &self.counts;
+        let owned = |c: u32| inv.get(&c).copied().unwrap_or(0);
+
+        // 4★：库存 3★ 两两合成。
+        let mut previews = Vec::new();
+        let mut crafted4: HashSet<u32> = HashSet::new();
+        for (&result, pairs) in &d.rev4 {
+            if let Some(&(a, b)) = pairs.iter().find(|&&(a, b)| {
+                if a == b {
+                    owned(a) >= 2
+                } else {
+                    owned(a) >= 1 && owned(b) >= 1
+                }
+            }) {
+                previews.push((4u8, a, b, result));
+                crafted4.insert(result);
+            }
+        }
+        // 5★：库存 4★（或由 3★ 现场合成的 4★）两两合成。
+        let avail4 = |c: u32| owned(c) >= 1 || crafted4.contains(&c);
+        let mut crafted5: HashSet<u32> = HashSet::new();
+        for (&result, pairs) in &d.rev5 {
+            if let Some(&(a, b)) = pairs.iter().find(|&&(a, b)| {
+                if a == b {
+                    owned(a) >= 2 || (owned(a) == 1 && crafted4.contains(&a))
+                } else {
+                    avail4(a) && avail4(b)
+                }
+            }) {
+                previews.push((5u8, a, b, result));
+                crafted5.insert(result);
+            }
+        }
+        // 7★：库存 5★（或由 4★ 现场合成的 5★）两两合成。
+        let avail5 = |c: u32| owned(c) >= 1 || crafted5.contains(&c);
+        for (&result, pairs) in &d.rev7 {
+            if let Some(&(a, b)) = pairs.iter().find(|&&(a, b)| {
+                if a == b {
+                    owned(a) >= 2 || (owned(a) == 1 && crafted5.contains(&a))
+                } else {
+                    avail5(a) && avail5(b)
+                }
+            }) {
+                previews.push((7u8, a, b, result));
+            }
+        }
+        previews.sort_by_key(|(star, a, _, result)| (*star, d.name(*result), d.name(*a)));
+        previews
     }
 
     fn render_route_list(
@@ -1155,7 +1319,7 @@ impl Render for App {
                     )
                     .child(
                         Label::new(SharedString::from(format!(
-                            "{server_label} 数据 · 像素星舰合成计算器 v1.0"
+                            "{server_label} 数据 · 像素星舰合成计算器 v1.1"
                         )))
                         .text_xs()
                         .text_color(cx.theme().muted_foreground),

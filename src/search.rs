@@ -56,6 +56,8 @@ struct Searcher<'a> {
     rev4: &'a BTreeMap<u32, Vec<(u32, u32)>>,
     /// 5★ 结果 → 4★ 材料对（深度 2 的中间合成）。
     rev5: &'a BTreeMap<u32, Vec<(u32, u32)>>,
+    /// 是否允许虚拟叶子材料（全部配方模式）。
+    allow_virtual: bool,
     limits: SearchLimits,
     visits: u64,
     truncated: bool,
@@ -120,6 +122,13 @@ impl<'a> Searcher<'a> {
             inv.insert(cid, owned);
         }
 
+        // 方式二：虚拟叶子（仅全部配方模式）——深度耗尽时不再要求库存持有。
+        if depth == 0 && self.allow_virtual {
+            mats.push(cid);
+            self.obtain(rest, fin, inv, steps, mats, out);
+            mats.pop();
+        }
+
         // 方式二：现场合成（受深度与合法材料表约束）。
         // 深度 2：合成 5★（4★+4★）；深度 1：合成 4★（3★+3★）。
         let rev = match depth {
@@ -142,11 +151,15 @@ impl<'a> Searcher<'a> {
 }
 
 /// 枚举目标英雄的全部可合成路线。路线按步骤数、材料数升序排序。
+///
+/// `allow_virtual` 为 `true` 时忽略库存约束（叶子材料视为虚拟可用），用于
+/// 展示目标的全部理论配方；此时 `inventory` 仅作为混合来源参与枚举。
 pub fn search_routes(
     data: &ServerData,
     target: u32,
     inventory: &Inventory,
     limits: SearchLimits,
+    allow_virtual: bool,
 ) -> SearchOutcome {
     let star = data.star(target);
     let Some(rev) = data.recipes_for(star) else {
@@ -169,11 +182,15 @@ pub fn search_routes(
 
     let mut inv = inventory.clone();
     inv.retain(|_, n| *n > 0);
+    if !allow_virtual && inv.is_empty() {
+        return SearchOutcome::default();
+    }
 
     let mut searcher = Searcher {
         hccl: data.hccl_for(target, star),
         rev4: &data.rev4,
         rev5: &data.rev5,
+        allow_virtual,
         limits,
         visits: 0,
         truncated: false,
@@ -234,7 +251,7 @@ mod tests {
         let (&pair, &result) = d.synth4.iter().next().expect("has recipes");
         let (a, b) = pair;
         let inv = [(a, 1u32), (b, 1u32)].into_iter().collect::<Inventory>();
-        let out = search_routes(d, result, &inv, SearchLimits::default());
+        let out = search_routes(d, result, &inv, SearchLimits::default(), false);
         assert!(out.routes.iter().any(|r| r.steps == vec![(a, b, result)]));
     }
 
@@ -256,7 +273,7 @@ mod tests {
             *inv.entry(x).or_insert(0) += 1;
             *inv.entry(y).or_insert(0) += 1;
         }
-        let out = search_routes(d, target, &inv, SearchLimits::default());
+        let out = search_routes(d, target, &inv, SearchLimits::default(), false);
         // 每条路线消耗的原始材料不超过库存。
         for route in &out.routes {
             let mut used: Inventory = Inventory::new();
@@ -321,7 +338,7 @@ mod tests {
                 *inv.entry(p3.1).or_insert(0) += 1;
             }
         }
-        let out = search_routes(d, target, &inv, SearchLimits::default());
+        let out = search_routes(d, target, &inv, SearchLimits::default(), false);
         assert!(
             !out.routes.is_empty(),
             "fully supplied chain must yield at least one route"
@@ -338,8 +355,53 @@ mod tests {
         let data = GameData::load();
         let d = &data.global;
         let target = cid_by_name(d, "银河魅魔");
-        let out = search_routes(d, target, &Inventory::new(), SearchLimits::default());
+        let out = search_routes(d, target, &Inventory::new(), SearchLimits::default(), false);
         assert!(out.routes.is_empty());
+    }
+
+    #[test]
+    fn virtual_mode_lists_all_recipes_without_inventory() {
+        // 只选目标、无材料时：枚举全部理论配方。
+        let data = GameData::load();
+        let d = &data.global;
+        let target = cid_by_name(d, "银河魅魔");
+        let out = search_routes(d, target, &Inventory::new(), SearchLimits::default(), true);
+        assert!(!out.routes.is_empty(), "virtual mode must list recipes");
+        // 每条路线的步骤链闭合且不消耗任何库存。
+        for route in &out.routes {
+            assert_eq!(route.steps[0].2, target);
+            assert_eq!(route.steps.len(), 7);
+            assert_eq!(route.mats.len(), 8);
+        }
+        // 无 3★ 材料库存约束时，任何通过 HCCL 可达的最终配方对都应被覆盖。
+        let hccl = d.hccl_for(target, 7).expect("hccl exists");
+        let craftable_pair_exists = d.rev7[&target].iter().any(|&(a, b)| {
+            hccl.contains(&a)
+                && hccl.contains(&b)
+                && d.rev5.get(&a).is_some_and(|v| {
+                    v.iter().any(|p| {
+                        hccl.contains(&p.0)
+                            && hccl.contains(&p.1)
+                            && d.rev4.contains_key(&p.0)
+                            && d.rev4.contains_key(&p.1)
+                    })
+                })
+                && d.rev5.get(&b).is_some_and(|v| {
+                    v.iter().any(|p| {
+                        hccl.contains(&p.0)
+                            && hccl.contains(&p.1)
+                            && d.rev4.contains_key(&p.0)
+                            && d.rev4.contains_key(&p.1)
+                    })
+                })
+        });
+        if craftable_pair_exists {
+            let covered = out.routes.iter().any(|r| {
+                let (a, b, _) = r.steps[0];
+                hccl.contains(&a) && hccl.contains(&b)
+            });
+            assert!(covered, "virtual mode must cover craftable final pairs");
+        }
     }
 
     /// 性能基准：全部 3★ 材料各 2 份，搜索 7★ 路线。默认忽略，需手动运行：
@@ -357,7 +419,7 @@ mod tests {
             }
         }
         let started = std::time::Instant::now();
-        let out = search_routes(d, target, &inv, SearchLimits::default());
+        let out = search_routes(d, target, &inv, SearchLimits::default(), false);
         let elapsed = started.elapsed();
         println!(
             "routes={} truncated={} visits={} elapsed={:.2}s",

@@ -1,6 +1,6 @@
 [package]
 name = "pixel-synthesis-calculator"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "像素星舰 (Pixel Starships) 英雄合成路线计算器 — Rust GUI 版"
 

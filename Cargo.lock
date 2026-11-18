@@ -4675,7 +4675,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-synthesis-calculator"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "gpui-kit",
  "rfd",
