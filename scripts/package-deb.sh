@@ -49,7 +49,7 @@ Terminal=false
 Categories=Game;Utility;
 EOF
 
-OUTPUT="$PKG_NAME_${VERSION}_amd64.deb"
+OUTPUT="${PKG_NAME}_${VERSION}_amd64.deb"
 rm -f "$OUTPUT"
 dpkg-deb --build --root-owner-group "$STAGE" "$OUTPUT"
 echo "已生成 $OUTPUT"
