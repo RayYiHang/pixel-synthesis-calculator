@@ -40,7 +40,7 @@ Linux 需先安装构建依赖：
 
 ```sh
 sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype-dev \
-  libxkbcommon-dev libxcb1-dev libwayland-dev libvulkan-dev
+  libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libwayland-dev libvulkan-dev
 ```
 
 ## 打包

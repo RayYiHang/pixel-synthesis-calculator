@@ -66,7 +66,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libfontconfig1-dev libfreetype-dev libxkbcommon-dev \
+            pkg-config libfontconfig1-dev libfreetype-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
             libxcb1-dev libwayland-dev libvulkan-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

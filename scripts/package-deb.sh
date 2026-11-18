@@ -30,7 +30,7 @@ Section: games
 Priority: optional
 Architecture: amd64
 Maintainer: RayYiHang <RayYiHang@users.noreply.github.com>
-Depends: libfontconfig1, libfreetype6, libxkbcommon0, libwayland-client0, libvulkan1
+Depends: libfontconfig1, libfreetype6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libvulkan1
 Description: 像素星舰 (Pixel Starships) 英雄合成路线计算器
  Rust GUI 版：输入目标英雄与已有材料，枚举全部可合成路线（3★+3★→4★，4★+4★→5★，5★+5★→7★）。
 EOF
