@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BIN_NAME: pixel-synthesis-calculator
+  APP_NAME: PixelSynthesisCalculator
+
+jobs:
+  build-windows:
+    name: Windows x64 (exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item target/release/pixel-synthesis-calculator.exe dist/PixelSynthesisCalculator.exe
+          Compress-Archive -Path dist/PixelSynthesisCalculator.exe -DestinationPath PixelSynthesisCalculator-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: PixelSynthesisCalculator-windows-x64.zip
+
+  build-macos:
+    name: macOS universal (dmg)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (aarch64 + x86_64)
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          lipo -create -output "$APP_NAME" \
+            target/aarch64-apple-darwin/release/pixel-synthesis-calculator \
+            target/x86_64-apple-darwin/release/pixel-synthesis-calculator
+      - name: Package dmg
+        run: bash scripts/package-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: ${{ env.APP_NAME }}-macos-universal.dmg
+
+  build-linux:
+    name: Linux amd64 (deb)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libfontconfig1-dev libfreetype-dev libxkbcommon-dev \
+            libxcb1-dev libwayland-dev libvulkan-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Package deb
+        run: bash scripts/package-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64
+          path: ${{ env.BIN_NAME }}_*_amd64.deb
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Attach artifacts to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/windows-x64/*
+            dist/macos-universal/*
+            dist/linux-amd64/*
+          generate_release_notes: true

@@ -1,0 +1,17 @@
+[package]
+name = "pixel-synthesis-calculator"
+version = "1.0.0"
+edition = "2021"
+description = "像素星舰 (Pixel Starships) 英雄合成路线计算器 — Rust GUI 版"
+
+[dependencies]
+gpui-kit = "0.10.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+strsim = "0.11"
+rfd = "0.15"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
